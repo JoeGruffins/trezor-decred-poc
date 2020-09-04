@@ -19,10 +19,10 @@ const CHANGE = 'device-changed'
 const DISCONNECT = 'device-disconnect'
 const AQUIRED = 'acquired'
 const NOBACKUP = 'no-backup'
-const coin = "Decred Testnet";
+const coin = "Decred Simnet";
 const coinNetwork = networks.decred;
-const walletCredentials = WalletCredentials("127.0.0.1", 19111,
-    "/home/joe/.dcrwallet/rpc.cert");
+const walletCredentials = WalletCredentials("127.0.0.1", 19558,
+    "/home/joe/dcrtesting/rpc.cert");
 // const walletCredentials = WalletCredentials("127.0.0.1", 19121,
     // "/home/user/.config/decrediton/wallets/testnet/trezor/rpc.cert");
 const debug = true;
@@ -204,7 +204,8 @@ const uiActions = {
 
     signTransaction: async () => {
       if (noDevice()) return
-      const destAddress = await ui.queryInput("Destination Address", "TsaT2QRgtJe5DnSzHfMEu65qzpfMEVGABmd");
+      const destAddress = await ui.queryInput("Destination Address", "SsWEd6y4mQxpQC9SS2yKQp6ZgWh2prstYYW");
+      //const destAddress = await ui.queryInput("Destination Address", "TsaT2QRgtJe5DnSzHfMEu65qzpfMEVGABmd");
       if (!destAddress) return;
 
       const destAmount = await ui.queryInput("Amount (in DCR)");
@@ -252,6 +253,106 @@ const uiActions = {
 
       const txHash = await wallet.publishTransaction(wsvc, signedRaw);
       log("Published tx", txHash);
+    },
+
+    purchaseTicket: async () => {
+      if (noDevice()) return
+      const wsvc = await InitService(services.WalletServiceClient, walletCredentials);
+      const decodeSvc = await InitService(services.DecodeMessageServiceClient, walletCredentials);
+      let res = await wallet.ticketPrice(wsvc)
+      var price = res.array[0]
+      res = await wallet.balance(wsvc, 0)
+      const availBal = res.array[1]
+      const relayFee = 2980 // private P2PKH
+      // const relayFee = 5440 // pool P2SH
+      const totalPrice = price + relayFee
+      res = await wallet.bestBlock(wsvc)
+      const height = res.array[0]
+      var poolFee = 0
+      // poolFee = trezorHelpers.stakePoolTicketFee(price, relayFee, height, 0.5)
+      // price -= poolFee
+      log("Balance:", availBal/1e8)
+      log("Ticket price:", totalPrice/1e8);
+      //log("Pool fee:", poolFee/1e8);
+      if (totalPrice + poolFee > availBal) {
+        log("Not enough funds to purchase a ticket.")
+      }
+      const address_n = trezorHelpers.addressPath(0, 0);
+      /*
+      const resp = await session.getAddress({
+        path: address_n,
+        coin: coin,
+        showOnTrezor: false
+      });
+      const addr = resp.payload.address;
+      */
+      const addr = "SspR5D7xL2XmyDkQxSfHJQBpxh7kwwwZyuK"
+      const zeroAddr = "SsUMGgvWLcixEeHv3GT4TGYyez4kY79RHth"
+
+      //const ticketInputTxHash = await sendToAddr(addr, totalPrice)
+      //log(ticketInputTxHash)
+      const ticketInputTxHash = "bb227c2a17fee03756fb12e10e2e50e97fa7216556b812801493bcfa52f94bd1"
+      const inp = await wallet.getTransaction(wsvc, ticketInputTxHash)
+      const decodedInp = await wallet.decodeTransaction(decodeSvc, inp.getTransaction());
+      const refTxs = [decodedInp].map(trezorHelpers.walletTxToRefTx);
+      const input = {
+        address_n: address_n,
+        prev_hash: ticketInputTxHash,
+        prev_index: 1,
+      }
+      const opreturn = trezorHelpers.makeCommitmentPush(addr, totalPrice)
+
+      const sstxsubmission = {
+          address: addr,
+          script_type: 'SSTXSUBMISSION',
+          amount: price.toString()
+      }
+      const sstxcommitment = {
+          script_type: 'PAYTOOPRETURN',
+          op_return_data: opreturn,
+          amount: "0"
+      }
+      const sstxchange = {
+          address: zeroAddr,
+          script_type: 'SSTXCHANGE',
+          amount: "0"
+      }
+      const inputs = [input]
+      const outputs = [sstxsubmission, sstxcommitment, sstxchange]
+
+      res = await session.signTransaction({
+        coin: coin,
+        inputs: inputs,
+        outputs: outputs,
+        refTxs: refTxs,
+      });
+      log(res.payload)
+      log(JSON.stringify(res.payload, null, 2));
+
+
+      // const poolInput = await sendToAddr(addr, poolFee)
+
+      /*
+      const signedResp = await session.signTransaction({
+        coin: coin,
+        inputs: txInfo.inputs,
+        outputs: txInfo.outputs,
+        refTxs: refTxs,
+        timestamp: 0
+      });
+      const signedRaw = signedResp.payload.serializedTx;
+      log("Successfully signed tx");
+
+      if (!publishTxs) {
+          log("Raw signed hex tx follows.");
+          log(signedRaw);
+          return;
+      }
+
+      const txHash = await wallet.publishTransaction(wsvc, signedRaw);
+      log("Published ticket", txHash);
+      */
+
     },
 
     initDevice: async () => {
@@ -388,6 +489,44 @@ function setDeviceListeners() {
     }
   })
 }
+
+async function sendToAddr(addr, amt) {
+  const wsvc = await InitService(services.WalletServiceClient, walletCredentials);
+  const decodeSvc = await InitService(services.DecodeMessageServiceClient, walletCredentials);
+
+  const output = { destination: addr, amount: amt}
+  const rawUnsigTxResp = await wallet.constructTransaction(wsvc, 0, 0, [output])
+  log("Got raw unsiged tx");
+  const rawUnsigTx = rawToHex(rawUnsigTxResp.res.getUnsignedTransaction());
+  debugLog("Raw unsigned tx hex follows");
+  debugLog(rawUnsigTx);
+
+  const decodedUnsigTx = await wallet.decodeTransaction(decodeSvc, rawUnsigTx)
+  log("Decoded unsigned tx");
+  // decodedUnsigTx.getInputsList().forEach((t, i) => log("input", i, t.toObject()))
+  // decodedUnsigTx.getOutputsList().forEach((t, i) => log("output", i, t.toObject()))
+
+  const inputTxs = await wallet.getInputTransactions(wsvc, decodeSvc, decodedUnsigTx);
+  log("Got input transactions (to extract pkscripts)");
+
+  const txInfo = await trezorHelpers.walletTxToBtcjsTx(decodedUnsigTx,
+      rawUnsigTxResp.res.getChangeIndex(), inputTxs, wsvc);
+  const refTxs = inputTxs.map(trezorHelpers.walletTxToRefTx);
+  log("Going to sign tx on trezor");
+  const signedResp = await session.signTransaction({
+    coin: coin,
+    inputs: txInfo.inputs,
+    outputs: txInfo.outputs,
+    refTxs: refTxs,
+  });
+  const signedRaw = signedResp.payload.serializedTx;
+  log("Successfully signed tx");
+
+  const txHash = await wallet.publishTransaction(wsvc, signedRaw);
+  log("Published tx", txHash);
+  return txHash
+}
+
 
 // start of main procedure
 ui.buildUI(uiActions);
